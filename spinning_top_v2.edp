@@ -1,0 +1,411 @@
+// ============================================================
+// SPINNING TOP ON RECTANGULAR BLOCK - CORRECT PHYSICS
+// FreeFEM++  |  3D VTU  |  D:\freefem++\spinning_top_v2\
+//
+// CORRECT CONTACT PHYSICS:
+//   Phase 1 (psi < psi_rim): TIP CONTACT ONLY
+//     Tip fixed at origin (0,0,0) on block surface.
+//     Top precesses freely. Tip always at z=0 by construction.
+//     psi grows slowly as spin decays.
+//
+//   Phase 2 (psi >= psi_rim): RIM CONTACT
+//     Flange rim hits block at psi_rim = atan(H_cone/R_max) = 31 deg.
+//     Top can no longer tilt further - rim rests on block.
+//     psi clamped at psi_rim. Top slides/rolls on rim and tip.
+//     Visible as top leaning over with both tip and rim on block.
+//
+//   This is exactly what a real spinning top does:
+//   spins upright -> slowly tilts -> flange hits table -> lies flat.
+//
+// GEOMETRY (tip ALWAYS at origin, no zLiftTop):
+//   Point at height s along axis, radius r(s), angle th:
+//     P = s*axis + r(s)*(cos(th)*e1 + sin(th)*e2)
+//   tip (s=0): P = (0,0,0) always. CORRECT.
+//   flange rim: hits z=0 exactly when psi = psi_rim.
+//   After rim contact: top frozen at psi_rim, precession stops.
+//
+// TOP SHAPE:
+//   z=0 to H_cone:   conical tip  (r = Rmax*z/Hcone)
+//   z=H_cone to Hfl: flat flange  (r = Rmax)
+//   z=Hfl to Hogv:   ogive taper  (r = linear Rmax->Rstem)
+//   z=Hogv to Htot:  stem         (r = Rstem)
+//
+// ============================================================
+
+load "iovtk"
+
+string outdir = "D:\\freefem++\\spinning_top_v2\\";
+system("mkdir \"D:\\freefem++\\spinning_top_v2\"");
+
+// ============================================================
+// TOP GEOMETRY
+// ============================================================
+real Hcone   = 0.012;
+real Rmax    = 0.020;
+real Hflange = 0.014;
+real Hogive  = 0.035;
+real Rstem   = 0.003;
+real Htotal  = 0.050;
+
+// Critical psi where flange rim touches block
+real psiRim  = atan2(Hcone, Rmax);   // = 31.0 deg
+
+// ============================================================
+// PHYSICAL PROPERTIES (pre-computed)
+// ============================================================
+real rhoTop = 7800.;
+real grav   = 9.81;
+real mTop   = 0.14257;
+real zCM    = 0.01660;
+real I3top  = 1.8326e-5;
+real I1top  = 1.6959e-5;
+real mgL    = mTop * grav * zCM;
+real OmCrit = 2. * sqrt(I1top * mgL) / I3top;
+
+cout << "============================================" << endl;
+cout << " SPINNING TOP v2 - Correct Contact Physics" << endl;
+cout << " OmCrit=" << OmCrit << "rad/s" << endl;
+cout << " psiRim=" << psiRim*180./pi << "deg (flange hits block)" << endl;
+cout << "============================================" << endl;
+
+// ============================================================
+// DAMPING
+// ============================================================
+real kSpin  = 0.12;
+real kappaM = 8.e-7;
+real epsReg = 1.e-3;
+
+// ============================================================
+// INITIAL CONDITIONS
+// ============================================================
+real psi0   = 5.0 * pi / 180.0;   // 5 deg tilt from vertical
+real psi    = psi0;
+real psiD   = 0.0;
+real Omega0 = 200.0;
+real Omega  = Omega0;
+real phi    = 0.0;
+
+real disc0  = I3top^2*Omega0^2 - 4.*I1top*mgL*cos(psi0);
+real phiD   = (I3top*Omega0 - sqrt(max(0.,disc0))) / (2.*I1top*cos(psi0));
+
+cout << " psi0=" << psi0*180./pi << "deg  Omega0=" << Omega0 << "rad/s" << endl;
+cout << " phiD0=" << phiD << "rad/s" << endl;
+
+// ============================================================
+// SIMULATION
+// ============================================================
+real Ttotal = 12.0;
+int  Nsteps = 240000;
+real dts    = Ttotal / real(Nsteps);
+int  Nsave  = 240;
+
+// ============================================================
+// PVD + CSV
+// ============================================================
+{
+    ofstream f(outdir+"scene.pvd");
+    f << "<?xml version='1.0'?>" << endl;
+    f << "<VTKFile type='Collection' version='0.1'><Collection>" << endl;
+}
+{
+    ofstream f(outdir+"top_data.csv");
+    f << "time_s,psiDeg,phiDeg,OmegaRads,phiDrads,EkinJ,phase" << endl;
+}
+
+// ============================================================
+// TOP RADIUS FUNCTION
+// ============================================================
+func real topRadius(real zz) {
+    if (zz <= 0.)        return 0.;
+    if (zz <  Hcone)     return Rmax * zz / Hcone;
+    if (zz <  Hflange)   return Rmax;
+    if (zz <  Hogive)    return Rmax*(1.-(zz-Hflange)/(Hogive-Hflange))
+                              + Rstem*(zz-Hflange)/(Hogive-Hflange);
+    if (zz <= Htotal)    return Rstem;
+    return 0.;
+}
+
+// ============================================================
+// WRITE BLOCK VTU (static, 200x200x20mm, top at z=0)
+// ============================================================
+{
+    real Lx=0.10, Ly=0.10, Lz=0.020;
+    ofstream bvtu(outdir+"block.vtu");
+    bvtu << "<?xml version='1.0'?>" << endl;
+    bvtu << "<VTKFile type='UnstructuredGrid' version='0.1'>" << endl;
+    bvtu << "<UnstructuredGrid><Piece NumberOfPoints='8' NumberOfCells='1'>" << endl;
+    bvtu << "<Points><DataArray type='Float64' NumberOfComponents='3' format='ascii'>" << endl;
+    bvtu << -Lx << " " << -Ly << " " << -Lz << endl;
+    bvtu <<  Lx << " " << -Ly << " " << -Lz << endl;
+    bvtu <<  Lx << " " <<  Ly << " " << -Lz << endl;
+    bvtu << -Lx << " " <<  Ly << " " << -Lz << endl;
+    bvtu << -Lx << " " << -Ly << " " << 0.   << endl;
+    bvtu <<  Lx << " " << -Ly << " " << 0.   << endl;
+    bvtu <<  Lx << " " <<  Ly << " " << 0.   << endl;
+    bvtu << -Lx << " " <<  Ly << " " << 0.   << endl;
+    bvtu << "</DataArray></Points><Cells>" << endl;
+    bvtu << "<DataArray type='Int64' Name='connectivity' format='ascii'>" << endl;
+    bvtu << "0 1 2 3 4 5 6 7" << endl;
+    bvtu << "</DataArray>" << endl;
+    bvtu << "<DataArray type='Int64' Name='offsets' format='ascii'>" << endl;
+    bvtu << "8" << endl;
+    bvtu << "</DataArray>" << endl;
+    bvtu << "<DataArray type='UInt8' Name='types' format='ascii'>" << endl;
+    bvtu << "12" << endl;
+    bvtu << "</DataArray></Cells></Piece></UnstructuredGrid></VTKFile>" << endl;
+    cout << "Block written." << endl;
+}
+
+// ============================================================
+// MAIN TIME LOOP
+// ============================================================
+bool rimContact = false;
+bool fullyRest  = false;
+real tRim       = Ttotal;
+
+for (int step=0; step<Nsteps; step++) {
+
+    real tphys = step * dts;
+    real sinP  = sin(psi);
+    real cosP  = cos(psi);
+
+    // Spin decays
+    Omega = Omega0 * exp(-kSpin * tphys);
+
+    // Phase 1: tip contact, free precession
+    if (!rimContact) {
+
+        // phiD from quasi-static equilibrium
+        real disc  = I3top^2*Omega^2 - 4.*I1top*mgL*max(cosP, 1.e-6);
+        if (disc > 0. && sinP > 1.e-4)
+            phiD = (I3top*Omega - sqrt(disc)) / (2.*I1top*cosP);
+        else
+            phiD = mgL / (I3top * max(Omega, 0.1));
+        if (phiD < 0.) phiD = 0.;
+
+        // Damping on psiD
+        real psiRg   = max(psi, epsReg);
+        real dampPsi = kappaM * abs(Omega) / (psiRg^2.5 + epsReg);
+
+        // EOM: gravity tilts top away from vertical
+        real bracket  = I1top*phiD^2*sinP*cosP
+                      - I3top*Omega*phiD*sinP
+                      + mgL*sinP;
+        real psiDDot  = bracket / I1top - dampPsi * psiD;
+
+        psiD += dts * psiDDot;
+        psi  += dts * psiD;
+        phi  += dts * phiD;
+
+        // Clamp: cannot go past upright
+        if (psi < 0.) { psi = -psi; psiD = -psiD; }
+
+        // Check rim contact
+        if (psi >= psiRim) {
+            rimContact = true;
+            tRim       = tphys;
+            psi        = psiRim;   // clamp at rim contact angle
+            psiD       = 0.;
+            cout << "  ** RIM CONTACT at t=" << tphys
+                 << "s  psi=" << psi*180./pi << "deg"
+                 << "  Omega=" << Omega << "rad/s" << endl;
+        }
+    }
+
+    // Phase 2: rim contact - top rests on rim + tip
+    // psi stays at psiRim, phi still precesses slowly then stops
+    if (rimContact) {
+        psi  = psiRim;
+        psiD = 0.;
+        // Slow precession on rim (rolling friction decays phi rate)
+        phiD = phiD * exp(-2.0 * dts);   // rapid phiD decay on contact
+        phi += dts * phiD;
+        if (abs(phiD) < 0.01) { phiD = 0.; fullyRest = true; }
+    }
+
+    // ----------------------------------------------------------
+    // OUTPUT every Nsave steps
+    // ----------------------------------------------------------
+    if (step % Nsave == 0) {
+
+        int frame = step / Nsave;
+        string num;
+        if      (frame <   10) num = "000" + frame;
+        else if (frame <  100) num = "00"  + frame;
+        else if (frame < 1000) num = "0"   + frame;
+        else                   num = ""    + frame;
+
+        real sinPout = sin(psi);
+        real cosPout = cos(psi);
+        real Ekin    = 0.5*I1top*(psiD^2+phiD^2*sinPout^2)+0.5*I3top*Omega^2;
+
+        string phase;
+        if      (fullyRest)              phase = "REST";
+        else if (rimContact)             phase = "RIM_CONTACT";
+        else if (psi > 20.*pi/180.)      phase = "FALLING";
+        else if (Omega < OmCrit*1.5)     phase = "NEAR_CRITICAL";
+        else                             phase = "SLEEPING";
+
+        // CSV
+        {
+            ofstream csv(outdir+"top_data.csv", append);
+            csv << tphys << "," << psi*180./pi << "," << phi*180./pi << ","
+                << Omega << "," << phiD << "," << Ekin << "," << phase << endl;
+        }
+
+        // -------------------------------------------------------
+        // 3D TOP VTU
+        // TIP ALWAYS AT ORIGIN (0,0,0)
+        // Axis: a = (sin(psi)*cos(phi), sin(psi)*sin(phi), cos(psi))
+        // e1 = (-sin(phi), cos(phi), 0)
+        // e2 = a x e1 = (cos(psi)*cos(phi), cos(psi)*sin(phi), -sin(psi))
+        // Point at height s, radius r, angle th:
+        //   P = s*a + r*(cos(th)*e1 + sin(th)*e2)
+        // At s=0: P = 0 -> tip at origin ALWAYS
+        // -------------------------------------------------------
+        int Nz    = 60;
+        int Ncirc = 36;
+        int Nverts= Nz*Ncirc + 2;
+        int Ncells= (Nz-1)*Ncirc + 2*Ncirc;
+
+        real ax  =  sinPout*cos(phi);
+        real ay  =  sinPout*sin(phi);
+        real az  =  cosPout;
+        real e1x = -sin(phi), e1y = cos(phi), e1z = 0.;
+        real e2x =  cosPout*cos(phi);
+        real e2y =  cosPout*sin(phi);
+        real e2z = -sinPout;
+
+        ofstream tvtu(outdir+"top_"+num+".vtu");
+        tvtu << "<?xml version='1.0'?>" << endl;
+        tvtu << "<VTKFile type='UnstructuredGrid' version='0.1'>" << endl;
+        tvtu << "<UnstructuredGrid><Piece NumberOfPoints='"
+             << Nverts << "' NumberOfCells='" << Ncells << "'>" << endl;
+        tvtu << "<Points><DataArray type='Float64' NumberOfComponents='3' format='ascii'>" << endl;
+
+        // v0: tip at origin (always z=0 on block surface)
+        tvtu << "0 0 0" << endl;
+
+        // Profile rings: s from near-tip to stem top
+        for (int iz=0; iz<Nz; iz++) {
+            real ss  = Htotal * (iz+1) / Nz;
+            real rad = topRadius(ss);
+            real cx  = ss*ax, cy = ss*ay, cz = ss*az;
+            for (int ic=0; ic<Ncirc; ic++) {
+                real th = 2.*pi*ic/Ncirc;
+                real ct = cos(th), st = sin(th);
+                tvtu << cx + rad*(ct*e1x+st*e2x) << " "
+                     << cy + rad*(ct*e1y+st*e2y) << " "
+                     << cz + rad*(ct*e1z+st*e2z) << endl;
+            }
+        }
+
+        // v_last: stem tip
+        tvtu << Htotal*ax << " " << Htotal*ay << " " << Htotal*az << endl;
+        tvtu << "</DataArray></Points>" << endl;
+
+        // Cells
+        tvtu << "<Cells><DataArray type='Int64' Name='connectivity' format='ascii'>" << endl;
+        // Bottom fan: tip to first ring
+        for (int ic=0; ic<Ncirc; ic++)
+            tvtu << 0 << " " << 1+ic << " " << 1+(ic+1)%Ncirc << endl;
+        // Side quads
+        for (int iz=0; iz<Nz-1; iz++) {
+            int b0 = 1+iz*Ncirc, b1 = 1+(iz+1)*Ncirc;
+            for (int ic=0; ic<Ncirc; ic++) {
+                int v0=b0+ic, v1=b0+(ic+1)%Ncirc;
+                int v2=b1+ic, v3=b1+(ic+1)%Ncirc;
+                tvtu << v0<<" "<<v1<<" "<<v3<<" "<<v2 << endl;
+            }
+        }
+        // Top fan: last ring to stem tip
+        int vL = Nverts-1, bL = 1+(Nz-1)*Ncirc;
+        for (int ic=0; ic<Ncirc; ic++)
+            tvtu << vL << " " << bL+(ic+1)%Ncirc << " " << bL+ic << endl;
+        tvtu << "</DataArray>" << endl;
+
+        // Offsets
+        tvtu << "<DataArray type='Int64' Name='offsets' format='ascii'>" << endl;
+        int off=0;
+        for (int c=0;c<Ncirc;       c++){off+=3;tvtu<<off<<endl;}
+        for (int c=0;c<(Nz-1)*Ncirc;c++){off+=4;tvtu<<off<<endl;}
+        for (int c=0;c<Ncirc;       c++){off+=3;tvtu<<off<<endl;}
+        tvtu << "</DataArray>" << endl;
+
+        // Types
+        tvtu << "<DataArray type='UInt8' Name='types' format='ascii'>" << endl;
+        for (int c=0;c<Ncirc;        c++) tvtu<<"5"<<endl;
+        for (int c=0;c<(Nz-1)*Ncirc; c++) tvtu<<"9"<<endl;
+        for (int c=0;c<Ncirc;        c++) tvtu<<"5"<<endl;
+        tvtu << "</DataArray></Cells>" << endl;
+
+        // Point data
+        real nuSteel = 0.30;
+        real sigC    = rhoTop * Omega^2 * (3.+nuSteel) / 8.;
+        tvtu << "<PointData>" << endl;
+
+        // HoopStress
+        tvtu << "<DataArray type='Float64' Name='HoopStress_Pa' format='ascii'>" << endl;
+        tvtu << 0. << endl;  // tip
+        for (int iz=0; iz<Nz; iz++) {
+            real ss=Htotal*(iz+1)/Nz;
+            real rad=topRadius(ss);
+            real sig=max(0., sigC*(Rmax^2-rad^2));
+            for (int ic=0; ic<Ncirc; ic++) tvtu << sig << endl;
+        }
+        tvtu << 0. << endl;  // stem tip
+        tvtu << "</DataArray>" << endl;
+
+        // AxisHeight (profile visualisation)
+        tvtu << "<DataArray type='Float64' Name='AxisHeight_m' format='ascii'>" << endl;
+        tvtu << 0. << endl;
+        for (int iz=0; iz<Nz; iz++) {
+            real ss=Htotal*(iz+1)/Nz;
+            for (int ic=0; ic<Ncirc; ic++) tvtu << ss << endl;
+        }
+        tvtu << Htotal << endl;
+        tvtu << "</DataArray>" << endl;
+
+        // psiDeg uniform
+        tvtu << "<DataArray type='Float64' Name='psiDeg' format='ascii'>" << endl;
+        for (int v=0; v<Nverts; v++) tvtu << psi*180./pi << endl;
+        tvtu << "</DataArray>" << endl;
+
+        // OmegaRads uniform
+        tvtu << "<DataArray type='Float64' Name='OmegaRads' format='ascii'>" << endl;
+        for (int v=0; v<Nverts; v++) tvtu << Omega << endl;
+        tvtu << "</DataArray>" << endl;
+
+        tvtu << "</PointData></Piece></UnstructuredGrid></VTKFile>" << endl;
+
+        // PVD
+        {
+            ofstream pvd(outdir+"scene.pvd", append);
+            pvd << "  <DataSet timestep='" << tphys
+                << "' group='' part='0' file='block.vtu'/>" << endl;
+            pvd << "  <DataSet timestep='" << tphys
+                << "' group='' part='1' file='top_" << num << ".vtu'/>" << endl;
+        }
+
+        cout << "t=" << tphys
+             << "s  psi=" << psi*180./pi << "deg"
+             << "  Om=" << Omega << "rad/s"
+             << "  phiD=" << phiD << "rad/s"
+             << "  [" << phase << "]" << endl;
+
+        if (fullyRest) break;
+    }
+
+} // end time loop
+
+{
+    ofstream f(outdir+"scene.pvd", append);
+    f << "</Collection></VTKFile>" << endl;
+}
+
+cout << "============================================" << endl;
+cout << " Done. D:\\freefem++\\spinning_top_v2\\scene.pvd" << endl;
+cout << " Phase 1: tip contact -> psi grows slowly" << endl;
+cout << " Phase 2: rim contact at psi=" << psiRim*180./pi << "deg -> top rests" << endl;
+cout << " Rim contact at: " << tRim << "s" << endl;
+cout << "============================================" << endl;
