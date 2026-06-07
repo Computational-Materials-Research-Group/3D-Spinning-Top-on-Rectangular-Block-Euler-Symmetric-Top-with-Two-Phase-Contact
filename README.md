@@ -1,0 +1,1 @@
+# 3D-Spinning-Top-on-Rectangular-Block-Euler-Symmetric-Top-with-Two-Phase-Contact
